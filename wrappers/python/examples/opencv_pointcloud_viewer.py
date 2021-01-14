@@ -31,6 +31,8 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 
+import yaml
+
 
 class AppState:
 
@@ -45,10 +47,19 @@ class AppState:
         self.decimate = 1
         self.scale = True
         self.color = True
+        self.settings = self.read_settings("C:/Users/Dell/Desktop/Software/librealsense/wrappers/python/examples/opencv_viewer_settings.yaml")
+        self.yaw_rate = self.settings["yaw_rate"]
+        self.pitch_rate = self.settings["pitch_rate"]
+        self.start_yaw = False
+        self.start_pitch = False
+        self.draw_grid = self.settings["grid"]
+        self.video_writer_color = cv2.VideoWriter('colorD455.avi', cv2.VideoWriter_fourcc(*'MJPG'), self.settings["framerate"], (640,480))
+        self.video_writer_pointcloud = cv2.VideoWriter('pointcloudD455.avi', cv2.VideoWriter_fourcc(*'MJPG'), self.settings["framerate"], (640,480))
 
-    def reset(self):
-        self.pitch, self.yaw, self.distance = 0, 0, 2
-        self.translation[:] = 0, 0, -1
+    def reset(self, dist=1, trans=-1):
+        self.pitch, self.yaw, self.distance = 0, 0, dist
+        self.start_pitch, self.start_yaw = False, False
+        self.translation[:] = 0, 0, trans
 
     @property
     def rotation(self):
@@ -59,6 +70,17 @@ class AppState:
     @property
     def pivot(self):
         return self.translation + np.array((0, 0, self.distance), dtype=np.float32)
+
+    def read_settings(self, settings_file):
+        print("reading settings")
+        try:
+            with open(settings_file, 'r') as settings:
+                setting =   yaml.load(settings, Loader=yaml.FullLoader)
+            print("read settings successfully")
+        except Exception as e:
+            print(f"exception --{e} occured while reading settings. Try providing absolute path\n")
+            sys.exit(0)
+        return setting
 
 
 state = AppState()
@@ -149,6 +171,7 @@ def project(v):
     # near clipping
     znear = 0.03
     proj[v[:, 2] < znear] = np.nan
+    # proj = np.hstack((proj,proj))
     return proj
 
 
@@ -258,10 +281,16 @@ def pointcloud(out, verts, texcoords, color, painter=True):
 
     # perform uv-mapping
     out[i[m], j[m]] = color[u[m], v[m]]
-
+    # out = np.vstack((out,out))
 
 out = np.empty((h, w, 3), dtype=np.uint8)
 
+info = """press y for starting Yaw motion
+press 1 for Speeding Yaw press 2 for Slowing Yaw 
+press f for Starting Pitch motion 
+press 3 for Speeding Pitch press 4 for Slowing Pitch"""
+print(info)
+initial_reset = False
 while True:
     # Grab camera data
     if not state.paused:
@@ -280,6 +309,9 @@ while True:
 
         depth_image = np.asanyarray(depth_frame.get_data())
         color_image = np.asanyarray(color_frame.get_data())
+
+        #write color frames to video
+        state.video_writer_color.write(color_image)
 
         depth_colormap = np.asanyarray(
             colorizer.colorize(depth_frame).get_data())
@@ -302,7 +334,8 @@ while True:
 
     out.fill(0)
 
-    grid(out, (0, 0.5, 1), size=1, n=10)
+    if state.draw_grid:
+        grid(out, (0, 0.5, 1), size=1, n=10)
     frustum(out, depth_intrinsics)
     axes(out, view([0, 0, 0]), state.rotation, size=0.1, thickness=1)
 
@@ -326,9 +359,11 @@ while True:
 
     cv2.imshow(state.WIN_NAME, out)
     key = cv2.waitKey(1)
+    #Writing point clud to video
+    state.video_writer_pointcloud.write(out)
 
     if key == ord("r"):
-        state.reset()
+        state.reset(5,-5)
 
     if key == ord("p"):
         state.paused ^= True
@@ -349,8 +384,45 @@ while True:
     if key == ord("e"):
         points.export_to_ply('./out.ply', mapped_frame)
 
+    if key == ord("y"):
+        if not state.start_yaw:
+            state.start_yaw = True
+        else:
+            state.start_yaw = False
+    
+    if key == ord("f"):
+        if not state.start_pitch:
+            state.start_pitch = True
+        else:
+            state.start_pitch = False
+    
+    # if key == 53:
+    #     state.distance += 0.5
+    # if key == 54:
+    #     state.distance -= 0.5
+
+    if state.start_yaw and not state.paused:
+        if key == 49:
+            state.yaw_rate = state.yaw_rate * 1.25
+        if key == 50:
+            state.yaw_rate = state.yaw_rate * 0.75
+        state.yaw += state.yaw_rate
+
+    if state.start_pitch and not state.paused:
+        if key == 51:
+            state.pitch_rate = state.pitch_rate * 1.25
+        if key == 52:
+            state.pitch_rate = state.pitch_rate * 0.75
+        state.pitch += state.pitch_rate
+    
+    if not initial_reset:
+        initial_reset = True
+        state.reset(5,-5)
+
     if key in (27, ord("q")) or cv2.getWindowProperty(state.WIN_NAME, cv2.WND_PROP_AUTOSIZE) < 0:
         break
 
 # Stop streaming
 pipeline.stop()
+state.video_writer_color.release()
+state.video_writer_pointcloud.release()
